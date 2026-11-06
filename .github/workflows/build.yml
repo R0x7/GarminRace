@@ -1,0 +1,61 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Connect IQ SDK 9.2.0 plus Garmin device files (including venu2).
+    # Pinned by digest so builds don't change under us; bump deliberately.
+    container:
+      image: ghcr.io/matco/connectiq-tester@sha256:64958e8fd2925d0c4986d72a9aa9d8e2101297a881354aab0118be2f1dc22105
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make device files visible to the compiler
+        # The image stores them under /root/.Garmin; Actions may set HOME elsewhere.
+        run: |
+          if [ "$HOME" != "/root" ] && [ ! -e "$HOME/.Garmin" ]; then
+            mkdir -p "$HOME"
+            ln -s /root/.Garmin "$HOME/.Garmin"
+          fi
+
+      - name: Prepare signing key
+        env:
+          DEVELOPER_KEY_B64: ${{ secrets.DEVELOPER_KEY_B64 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/key"
+          if [ -n "$DEVELOPER_KEY_B64" ]; then
+            echo "Using DEVELOPER_KEY_B64 secret"
+            echo "$DEVELOPER_KEY_B64" | base64 -d > "$RUNNER_TEMP/key/developer_key"
+          else
+            echo "::notice::DEVELOPER_KEY_B64 secret not set; signing with a throwaway key"
+            openssl genrsa -out "$RUNNER_TEMP/key/key.pem" 4096
+            openssl pkcs8 -topk8 -inform PEM -outform DER -nocrypt \
+              -in "$RUNNER_TEMP/key/key.pem" -out "$RUNNER_TEMP/key/developer_key"
+          fi
+
+      - name: Build
+        run: |
+          mkdir -p bin
+          monkeyc -d venu2 -f monkey.jungle -o bin/GarminRace2.prg \
+            -y "$RUNNER_TEMP/key/developer_key" -w
+
+      - name: Remove signing key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/key"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GarminRace2-${{ github.sha }}
+          path: bin/GarminRace2.prg
+          if-no-files-found: error

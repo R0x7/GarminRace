@@ -64,6 +64,12 @@ monkeyc -d venu2 -f monkey.jungle -o bin\GarminRace2.prg -y path\to\developer_ke
 
 `build.bat` looks for the key in `%DEV_KEY%`, then `developer_key` next to the script, then `..\..\GarminRace\developer_key`. Keys are gitignored. Never commit yours.
 
+### CI
+
+GitHub Actions (`.github/workflows/build.yml`) builds the app on every push to `main`, on pull requests, and on demand from the Actions tab. The built `GarminRace2.prg` is attached to each run as a downloadable artifact.
+
+To sign CI builds with your own key, add a repository secret named `DEVELOPER_KEY_B64` holding the base64 of your `developer_key` file (PowerShell: `[Convert]::ToBase64String([IO.File]::ReadAllBytes("developer_key"))`). Without it, CI signs with a throwaway key, which still checks that the code compiles.
+
 ## Installing on the watch
 
 The Venu 2 connects as a media (MTP) device. In File Explorer, copy `bin\GarminRace2.prg` into **Venu 2 › Internal Storage › GARMIN › APPS**, then unplug the watch.
