@@ -41,7 +41,10 @@ class LapTrace {
 
     // Time into this lap (ms) at the point nearest (x, y), interpolated
     // between fixes; -1 if no part of the lap is within MATCH_RADIUS_M.
-    function timeAt(x, y) as Number {
+    // elapsed: time into the current lap, used to keep a full-lap search from
+    // matching a far-off part of the record lap that passes close by (on a
+    // circuit both ends of the record lap sit on the start/finish line).
+    function timeAt(x, y, elapsed) as Number {
         var n = size();
         if (n < 2) { return -1; }
         var px = (x * 10.0).toFloat();      // to decimetres
@@ -52,11 +55,14 @@ class LapTrace {
         if (lo < 0) { lo = 0; }
         var hi = _cursor + MATCH_LOOKAHEAD;
         if (hi > n - 1) { hi = n - 1; }
-        var best = nearest(px, py, lo, hi);
-        if (best[1] > r2) {
-            // Lost the thread (GPS gap, off track): search the whole lap once.
-            best = nearest(px, py, 0, n - 1);
-            if (best[1] > r2) { return -1; }
+        var best = nearest(px, py, lo, hi, null, null);
+        if (best[1] < 0 || best[1] > r2) {
+            // Lost the thread (GPS gap, off track): search the whole lap, but
+            // only where the record lap was at a similar time (±50%, ±10 s).
+            var slack = elapsed / 2;
+            if (slack < 10000) { slack = 10000; }
+            best = nearest(px, py, 0, n - 1, elapsed - slack, elapsed + slack);
+            if (best[1] < 0 || best[1] > r2) { return -1; }
         }
         var i = best[0] as Number;
         _cursor = i;
@@ -75,11 +81,17 @@ class LapTrace {
         return (t0 + seg[0] * (t1 - t0)).toNumber();
     }
 
-    // [index, squaredDistance] of the point in lo..hi closest to (px, py)
-    private function nearest(px, py, lo, hi) as Array {
+    // [index, squaredDistance] of the point in lo..hi closest to (px, py),
+    // optionally only among points timed within tMin..tMax. Distance is -1
+    // if no point qualified.
+    private function nearest(px, py, lo, hi, tMin, tMax) as Array {
         var bi = lo;
         var bd = -1.0;
         for (var i = lo; i <= hi; i++) {
+            if (tMin != null) {
+                var pt = pts[i * 3 + 2];
+                if (pt < tMin || pt > tMax) { continue; }
+            }
             var dx = pts[i * 3] - px;
             var dy = pts[i * 3 + 1] - py;
             var d = dx * dx + dy * dy;

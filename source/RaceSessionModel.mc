@@ -2,6 +2,7 @@ import Toybox.Activity;
 import Toybox.ActivityRecording;
 import Toybox.Application;
 import Toybox.Lang;
+import Toybox.Math;
 import Toybox.Position;
 import Toybox.System;
 import Toybox.UserProfile;
@@ -71,6 +72,9 @@ class RaceSessionModel {
     private var _lon1;
     private var _ms1;
     private var _hasPrev;
+    private var _spd0;          // Doppler speed at the previous fix, m/s or null
+    private var _spd1;
+    private var _pending;       // [[gate, heading], ...] learned this lap, saved when it completes
 
     private var _trace;         // LapTrace of the lap in progress
     private var _splitTimes;    // cumulative split times in the lap in progress
@@ -124,6 +128,7 @@ class RaceSessionModel {
         _trace = null;
         _splitTimes = [];
         _hasPrev = false;
+        _pending = [];
     }
 
     function mode() as Number {
@@ -162,6 +167,7 @@ class RaceSessionModel {
 
     function selectTrack(id) as Boolean {
         if (isRecording) { return false; }
+        if (id == track.id) { _autoPicked = true; return true; }   // keep the session's laps on screen
         var t = TrackStore.load(id);
         if (t == null) { return false; }
         _autoPicked = true;
@@ -239,30 +245,30 @@ class RaceSessionModel {
         return TimingGate.fromLocation(currentLocation, h, GATE_RADIUS_M);
     }
 
-    // Moving the start or finish line changes the lap, so old records no longer apply.
-    private function linesChanged() as Number {
+    // Moving the start or finish line changes the lap, so old records no longer
+    // apply. The finish line is only used by sprint and drag, so moving it
+    // leaves circuit records alone.
+    private function linesChanged(finishOnly as Boolean) as Number {
         TrackStore.save(track);
-        if (TrackStore.hasRecords(track.id)) {
-            TrackStore.clearRecords(track.id);
-            record = null;
-            return LINE_SET_RECORD_RESET;
-        }
-        record = null;
-        return LINE_SET;
+        var firstMode = finishOnly ? MODE_SPRINT : MODE_CIRCUIT;
+        var had = TrackStore.hasRecords(track.id, firstMode);
+        TrackStore.clearRecords(track.id, firstMode);
+        record = TrackStore.loadRecord(track.id, track.mode);
+        return had ? LINE_SET_RECORD_RESET : LINE_SET;
     }
 
     function setStartLine() as Number {
         var g = gateHere();
         if (g == null) { return LINE_FAILED; }
         track.startGate = g;
-        return linesChanged();
+        return linesChanged(false);
     }
 
     function setFinishLine() as Number {
         var g = gateHere();
         if (g == null) { return LINE_FAILED; }
         track.finishGate = g;
-        return linesChanged();
+        return linesChanged(true);
     }
 
     function canAddSplit() as Boolean {
@@ -294,11 +300,11 @@ class RaceSessionModel {
         track.startGate = null;
         track.finishGate = null;
         track.splits = [];
-        linesChanged();
+        linesChanged(false);
     }
 
     function setMode(m as Number) as Void {
-        if (isRecording) { return; }
+        if (isRecording || m == track.mode) { return; }
         track.mode = m;
         TrackStore.save(track);
         record = TrackStore.loadRecord(track.id, m);
@@ -425,15 +431,15 @@ class RaceSessionModel {
         }
 
         if (isRecording && _hasPrev && (now - _ms1) <= MAX_FIX_GAP_MS) {
-            _lat0 = _lat1; _lon0 = _lon1; _ms0 = _ms1;
-            _lat1 = lat;   _lon1 = lon;   _ms1 = now;
+            _lat0 = _lat1; _lon0 = _lon1; _ms0 = _ms1; _spd0 = _spd1;
+            _lat1 = lat;   _lon1 = lon;   _ms1 = now; _spd1 = speed;
             // A car that's parked or crawling never crosses a line: this keeps
             // GPS wander from triggering a start while you're staged on the line.
             if (speed == null || speed >= MIN_CROSS_SPEED) {
                 evt = detectCrossing();
             }
         } else {
-            _lat1 = lat; _lon1 = lon; _ms1 = now;
+            _lat1 = lat; _lon1 = lon; _ms1 = now; _spd1 = speed;
         }
         _hasPrev = true;
 
@@ -452,7 +458,7 @@ class RaceSessionModel {
         liveDeltaMs = null;
         liveProgress = null;
         if (record != null && record.trace != null && record.ms != null && record.ms > 0) {
-            var refT = record.trace.timeAt(p[0], p[1]);
+            var refT = record.trace.timeAt(p[0], p[1], el);
             if (refT >= 0) {
                 liveDeltaMs = el - refT;
                 liveProgress = refT.toFloat() / record.ms;
@@ -485,8 +491,8 @@ class RaceSessionModel {
             // Armed: waiting for the start line
             var ts = crossFrac(track.startGate);
             if (ts < 0) { return EVENT_NONE; }
+            beginLap(startTime(ts), ts);
             learnDirection(track.startGate);
-            beginLap(segTime(ts), ts);
             // Close the out-lap (or the transit between runs) in the FIT file
             if (_activity != null && _activity.isRecording()) {
                 if (_fit != null) { _fit.clearLap(); }
@@ -499,22 +505,49 @@ class RaceSessionModel {
 
         var endGate = (m == MODE_CIRCUIT) ? track.startGate : track.finishGate;
         var te = crossFrac(endGate);
-        if (te < 0) { return evt; }
-        var at = segTime(te);
-        var minMs = MIN_LAP_MS;
-        if (m == MODE_SPRINT) { minMs = SPRINT_MIN_RUN_MS; }
-        else if (m == MODE_DRAG) { minMs = DRAG_MIN_RUN_MS; }
-        if (at - lapStartMs < minMs) { return evt; }
-
-        learnDirection(endGate);
-        completeLap(at, te);
-        if (m == MODE_CIRCUIT) {
-            beginLap(at, te);
-        } else {
-            lapStartMs = null;      // re-armed for the next run
-            _trace = null;
+        if (te >= 0) {
+            var at = segTime(te);
+            var minMs = MIN_LAP_MS;
+            if (m == MODE_SPRINT) { minMs = SPRINT_MIN_RUN_MS; }
+            else if (m == MODE_DRAG) { minMs = DRAG_MIN_RUN_MS; }
+            if (at - lapStartMs >= minMs) {
+                learnDirection(endGate);
+                completeLap(at, te);
+                if (m == MODE_CIRCUIT) {
+                    beginLap(at, te);
+                } else {
+                    lapStartMs = null;      // re-armed for the next run
+                    _trace = null;
+                    if (_fit != null) { _fit.setLiveDelta(null); }
+                }
+                return EVENT_LAP_COMPLETED;
+            }
         }
-        return EVENT_LAP_COMPLETED;
+
+        // Sprint/drag: crossing the start line again before any split (e.g.
+        // driving back through it to stage) restarts the run from there.
+        if (m != MODE_CIRCUIT && _splitTimes.size() == 0) {
+            var tr = crossFrac(track.startGate);
+            if (tr >= 0) {
+                var atr = startTime(tr);
+                if (atr - lapStartMs >= DRAG_MIN_RUN_MS) {
+                    beginLap(atr, tr);
+                    learnDirection(track.startGate);
+                    return EVENT_TIMING_STARTED;
+                }
+            }
+        }
+        return evt;
+    }
+
+    // Start-line crossing time. In drag mode a launch from rest accelerates
+    // through the segment, so distance grows with time squared: the line is
+    // reached at sqrt(fraction) of the segment's time, not at the fraction.
+    private function startTime(t) as Number {
+        if (track.mode == MODE_DRAG && (_spd0 == null || _spd0 < MIN_CROSS_SPEED)) {
+            return segTime(Math.sqrt(t));
+        }
+        return segTime(t);
     }
 
     // Checks the next split line in order. Returns true if it was crossed.
@@ -540,19 +573,36 @@ class RaceSessionModel {
         return true;
     }
 
-    // A line set while standing still has no direction. Take it from the first
-    // real crossing, so from then on wrong-way passes are ignored.
+    // A line set while standing still has no direction. Take it from the
+    // crossings of the first lap or run that completes, so from then on
+    // wrong-way passes are ignored. Nothing is kept from a run that never
+    // finishes (or is restarted), so driving back through the start line to
+    // stage can't teach it the wrong way.
     private function learnDirection(gate) as Void {
         if (gate == null || gate.heading != null) { return; }
-        var h = gate.headingOf(_lat0, _lon0, _lat1, _lon1, _ms1 - _ms0, MIN_HEADING_SPEED);
-        if (h != null) {
-            gate.heading = h;
-            TrackStore.save(track);
+        for (var i = 0; i < _pending.size(); i++) {
+            if (_pending[i][0] == gate) { return; }
         }
+        var h = gate.headingOf(_lat0, _lon0, _lat1, _lon1, _ms1 - _ms0, MIN_HEADING_SPEED);
+        if (h != null) { _pending.add([gate, h]); }
+    }
+
+    private function commitDirections() as Void {
+        var changed = false;
+        for (var i = 0; i < _pending.size(); i++) {
+            var g = _pending[i][0];
+            if (g.heading == null) {
+                g.heading = _pending[i][1];
+                changed = true;
+            }
+        }
+        _pending = [];
+        if (changed) { TrackStore.save(track); }
     }
 
     private function beginLap(at as Number, t) as Void {
         lapStartMs = at;
+        _pending = [];
         _splitTimes = [];
         lastSplitIndex = null;
         liveDeltaMs = null;
@@ -564,6 +614,7 @@ class RaceSessionModel {
     }
 
     private function completeLap(at as Number, t) as Void {
+        commitDirections();
         var lap = at - lapStartMs;
         if (_trace != null) {
             var p = segPoint(t);

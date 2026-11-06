@@ -210,8 +210,13 @@ module TrackStore {
         return out;
     }
 
+    // Storage can throw when the object store is full; the track then just
+    // isn't persisted, rather than crashing mid-session.
     function save(track) as Void {
-        Application.Storage.setValue(trackKey(track.id), track.toStorage());
+        try {
+            Application.Storage.setValue(trackKey(track.id), track.toStorage());
+        } catch (e) {
+        }
     }
 
     function canCreate() as Boolean {
@@ -228,17 +233,23 @@ module TrackStore {
         t.mode = mode;
         list.add(next);
         save(t);
-        Application.Storage.setValue("tracks", list);
-        Application.Storage.setValue("trackNext", next + 1);
+        try {
+            Application.Storage.setValue("tracks", list);
+            Application.Storage.setValue("trackNext", next + 1);
+        } catch (e) {
+        }
         return t;
     }
 
     function remove(id) as Void {
         var list = ids();
         list.remove(id);
-        Application.Storage.setValue("tracks", list);
         Application.Storage.deleteValue(trackKey(id));
-        clearRecords(id);
+        clearRecords(id, MODE_CIRCUIT);
+        try {
+            Application.Storage.setValue("tracks", list);
+        } catch (e) {
+        }
     }
 
     function loadRecord(id, mode) {
@@ -257,15 +268,16 @@ module TrackStore {
         }
     }
 
-    function hasRecords(id) as Boolean {
-        for (var m = 0; m < MODE_COUNT; m++) {
+    // Records for modes firstMode..last (MODE_CIRCUIT = all, MODE_SPRINT = sprint and drag)
+    function hasRecords(id, firstMode) as Boolean {
+        for (var m = firstMode; m < MODE_COUNT; m++) {
             if (Application.Storage.getValue(recordKey(id, m)) != null) { return true; }
         }
         return false;
     }
 
-    function clearRecords(id) as Void {
-        for (var m = 0; m < MODE_COUNT; m++) {
+    function clearRecords(id, firstMode) as Void {
+        for (var m = firstMode; m < MODE_COUNT; m++) {
             Application.Storage.deleteValue(recordKey(id, m));
         }
     }
