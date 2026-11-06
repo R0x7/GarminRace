@@ -55,10 +55,33 @@ class TimingGate {
         return heading != null;
     }
 
-    // Flat-earth projection around the gate (accurate to cm over a few hundred m).
-    private function toLocal(lat, lon) as Array {
+    // Flat-earth projection around the gate: [east, north] in metres.
+    // Accurate to cm over a few hundred metres, and to well under 1% over a few km.
+    function toLocal(lat, lon) as Array {
         return [(lon - lonRad) * _cosLat * EARTH_RADIUS_M,
                 (lat - latRad) * EARTH_RADIUS_M];
+    }
+
+    // Straight-line distance in metres from the gate to a point (radians).
+    function distanceTo(lat, lon) as Float {
+        var p = toLocal(lat, lon);
+        return Math.sqrt(p[0] * p[0] + p[1] * p[1]).toFloat();
+    }
+
+    // Direction of travel (radians, 0 = north, clockwise) along the segment
+    // prev->cur, or null if it was covered slower than minSpeed (m/s), where
+    // GPS direction isn't reliable.
+    function headingOf(lat0, lon0, lat1, lon1, dtMs, minSpeed) {
+        if (dtMs <= 0) { return null; }
+        var a = toLocal(lat0, lon0);
+        var b = toLocal(lat1, lon1);
+        var dx = b[0] - a[0];
+        var dy = b[1] - a[1];
+        var len = Math.sqrt(dx * dx + dy * dy);
+        if (len * 1000.0 / dtMs < minSpeed) { return null; }
+        var h = Math.atan2(dx, dy);
+        if (h < 0) { h += 2.0 * Math.PI; }
+        return h.toFloat();
     }
 
     // Returns the fraction (0..1) along the segment prev->cur at which the gate

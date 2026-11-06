@@ -1,0 +1,24 @@
+<!-- Labels for the developer fields written by source/RaceFit.mc. Ids must match FIT_* there. -->
+<resources>
+    <fitContributions>
+        <fitField id="0" displayInChart="true" sortOrder="0" precision="2"
+            chartTitle="@Strings.fit_live_delta_chart" dataLabel="@Strings.fit_live_delta"
+            unitLabel="@Strings.fit_seconds" fillColor="#00AAFF" />
+        <fitField id="1" displayInChart="false" displayInActivityLaps="true" sortOrder="1" precision="2"
+            dataLabel="@Strings.fit_lap_time" unitLabel="@Strings.fit_seconds" />
+        <fitField id="2" displayInChart="false" displayInActivityLaps="true" sortOrder="2" precision="2"
+            dataLabel="@Strings.fit_gap_to_record" unitLabel="@Strings.fit_seconds" />
+        <fitField id="3" displayInChart="false" displayInActivityLaps="true" sortOrder="3" precision="2"
+            dataLabel="@Strings.fit_sector_1" unitLabel="@Strings.fit_seconds" />
+        <fitField id="4" displayInChart="false" displayInActivityLaps="true" sortOrder="4" precision="2"
+            dataLabel="@Strings.fit_sector_2" unitLabel="@Strings.fit_seconds" />
+        <fitField id="5" displayInChart="false" displayInActivityLaps="true" sortOrder="5" precision="2"
+            dataLabel="@Strings.fit_sector_3" unitLabel="@Strings.fit_seconds" />
+        <fitField id="6" displayInChart="false" displayInActivitySummary="true" sortOrder="6" precision="2"
+            dataLabel="@Strings.fit_best_lap" unitLabel="@Strings.fit_seconds" />
+        <fitField id="7" displayInChart="false" displayInActivitySummary="true" sortOrder="7" precision="2"
+            dataLabel="@Strings.fit_optimal_lap" unitLabel="@Strings.fit_seconds" />
+        <fitField id="8" displayInChart="false" displayInActivitySummary="true" sortOrder="8" precision="2"
+            dataLabel="@Strings.fit_track_record" unitLabel="@Strings.fit_seconds" />
+    </fitContributions>
+</resources>

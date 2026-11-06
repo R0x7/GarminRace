@@ -40,6 +40,11 @@ module RaceAlerts {
         tone(Attention.TONE_START);
     }
 
+    // Quick buzz as a split line is crossed
+    function split() as Void {
+        vibrate([new Attention.VibeProfile(80, 150)]);
+    }
+
     // Long buzz for a lap; triple buzz for a new best
     function lap(isBest as Boolean) as Void {
         if (isBest) {

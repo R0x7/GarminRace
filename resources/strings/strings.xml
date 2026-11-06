@@ -9,4 +9,17 @@
     <string id="menu_start_session">Start Session</string>
     <string id="menu_stop_session">Stop Session</string>
     <string id="menu_reset_session">Reset Session</string>
+
+    <!-- Garmin Connect labels for the FIT developer fields -->
+    <string id="fit_seconds">s</string>
+    <string id="fit_live_delta">Live Delta</string>
+    <string id="fit_live_delta_chart">Delta to Track Record</string>
+    <string id="fit_lap_time">Lap Time</string>
+    <string id="fit_gap_to_record">Gap to Record</string>
+    <string id="fit_sector_1">Sector 1</string>
+    <string id="fit_sector_2">Sector 2</string>
+    <string id="fit_sector_3">Sector 3</string>
+    <string id="fit_best_lap">Best Lap</string>
+    <string id="fit_optimal_lap">Optimal Lap</string>
+    <string id="fit_track_record">Track Record</string>
 </strings>

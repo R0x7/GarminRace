@@ -6,6 +6,8 @@ const ACTION_STOP_SAVE = 1;
 const ACTION_STOP_SAVE_EXIT = 2;
 const ACTION_DISCARD = 3;
 const ACTION_CLEAR_LINES = 4;
+const ACTION_DELETE_TRACK = 5;
+const ACTION_CLEAR_SPLITS = 6;
 
 // Button handling on the main screen:
 //   START (top button)  - start session / stop & save (with confirmation)
@@ -68,21 +70,28 @@ module RaceActions {
         }
         s.startSession();
         RaceAlerts.confirm();
-        RaceAlerts.toast(s.isPointToPoint ? "Armed - cross start" : "Armed - cross line");
+        RaceAlerts.toast(s.isRunMode() ? "Armed - cross start" : "Armed - cross line");
         WatchUi.requestUpdate();
     }
 
     function confirm(message as String, action as Number) as Void {
-        WatchUi.pushView(new WatchUi.Confirmation(message), new ConfirmActionDelegate(action), WatchUi.SLIDE_IMMEDIATE);
+        confirmWith(message, action, null);
+    }
+
+    // arg: extra data for the action (the track id for ACTION_DELETE_TRACK)
+    function confirmWith(message as String, action as Number, arg) as Void {
+        WatchUi.pushView(new WatchUi.Confirmation(message), new ConfirmActionDelegate(action, arg), WatchUi.SLIDE_IMMEDIATE);
     }
 }
 
 class ConfirmActionDelegate extends WatchUi.ConfirmationDelegate {
     private var _action as Number;
+    private var _arg;
 
-    function initialize(action as Number) {
+    function initialize(action as Number, arg) {
         ConfirmationDelegate.initialize();
         _action = action;
+        _arg = arg;
     }
 
     function onResponse(response as WatchUi.Confirm) as Boolean {
@@ -103,6 +112,15 @@ class ConfirmActionDelegate extends WatchUi.ConfirmationDelegate {
         } else if (_action == ACTION_CLEAR_LINES) {
             s.clearLines();
             RaceAlerts.toast("Lines cleared");
+        } else if (_action == ACTION_CLEAR_SPLITS) {
+            s.clearSplits();
+            RaceAlerts.toast("Splits cleared");
+        } else if (_action == ACTION_DELETE_TRACK) {
+            if (s.deleteTrack(_arg)) {
+                RaceAlerts.toast("Track deleted");
+            } else {
+                RaceAlerts.error();
+            }
         }
         WatchUi.requestUpdate();
         return true;

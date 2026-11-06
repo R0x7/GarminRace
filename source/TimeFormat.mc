@@ -22,6 +22,16 @@ module TimeFormat {
         return mins.format("%d") + ":" + secs.format("%02d") + "." + tenths.format("%d");
     }
 
+    // 28.4 or 1:02.3 (sector times)
+    function short(ms) as String {
+        if (ms == null) { return "--"; }
+        if (ms < 0) { ms = 0; }
+        if (ms < 60000) {
+            return (ms / 1000).format("%d") + "." + ((ms % 1000) / 100).format("%d");
+        }
+        return lapTenths(ms);
+    }
+
     // +0.65 / -1.20
     function delta(ms) as String {
         if (ms == null) { return ""; }

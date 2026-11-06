@@ -6,7 +6,8 @@ const HISTORY_ROWS = 4;
 
 // Lap history (swipe up from the main screen). Newest first. Each row shows
 // the lap number, time and gap to best, with a bar showing how far off the
-// best it was relative to the slowest lap. The best lap is highlighted.
+// best it was relative to the slowest lap (or, with split lines, the lap's
+// sector times). The best lap is highlighted.
 class LapHistoryView extends WatchUi.View {
     var scroll as Number = 0;
 
@@ -26,7 +27,7 @@ class LapHistoryView extends WatchUi.View {
         var cx = dc.getWidth() / 2;
         var laps = s.laps as Array<Number>;
         var n = laps.size();
-        var unit = s.isPointToPoint ? "RUN" : "LAP";
+        var unit = s.isRunMode() ? "RUN" : "LAP";
         var cj = Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER;
         var lj = Graphics.TEXT_JUSTIFY_LEFT | Graphics.TEXT_JUSTIFY_VCENTER;
         var rj = Graphics.TEXT_JUSTIFY_RIGHT | Graphics.TEXT_JUSTIFY_VCENTER;
@@ -35,8 +36,12 @@ class LapHistoryView extends WatchUi.View {
         dc.setColor(COLOR_BG, COLOR_BG);
         dc.clear();
 
+        // "12 LAPS · OPT 1:23.10" (optimal lap = sum of this session's best sectors)
+        var title = n.toString() + " " + unit + (n == 1 ? "" : "S");
+        var opt = s.optimalMs();
+        if (opt != null) { title += "  ·  OPT " + TimeFormat.lap(opt); }
         dc.setColor(COLOR_MUTED, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cx, 50 * k, Graphics.FONT_XTINY, n.toString() + " " + unit + (n == 1 ? "" : "S"), cj);
+        dc.drawText(cx, 50 * k, Graphics.FONT_XTINY, title, cj);
 
         if (n == 0) {
             dc.setColor(COLOR_DIM, Graphics.COLOR_TRANSPARENT);
@@ -52,8 +57,11 @@ class LapHistoryView extends WatchUi.View {
         var spread = slowest - best;
         if (spread < 1) { spread = 1; }
 
+        var rec = s.referenceMs();
+        var bestLine = "BEST " + TimeFormat.lap(best);
+        if (rec != null && rec < best) { bestLine += "  REC " + TimeFormat.lap(rec); }
         dc.setColor(COLOR_GOOD, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(cx, 80 * k, Graphics.FONT_TINY, "BEST " + TimeFormat.lap(best), cj);
+        dc.drawText(cx, 80 * k, (rec != null && rec < best) ? Graphics.FONT_XTINY : Graphics.FONT_TINY, bestLine, cj);
         dc.setColor(COLOR_RULE, Graphics.COLOR_TRANSPARENT);
         dc.fillRectangle(cx - 120 * k, 106 * k, 240 * k, 2);
 
@@ -79,6 +87,21 @@ class LapHistoryView extends WatchUi.View {
             dc.drawText(cx - 6 * k, y - 4 * k, Graphics.FONT_SMALL, TimeFormat.lap(lap), cj);
             dc.setColor(isBest ? COLOR_GOOD : COLOR_BAD, Graphics.COLOR_TRANSPARENT);
             dc.drawText(x1, y - 4 * k, Graphics.FONT_TINY, isBest ? "BEST" : TimeFormat.delta(lap - best), rj);
+
+            // Sector times in place of the bar when every split was crossed;
+            // the session's best sector times are green.
+            var sec = (idx < s.lapSectors.size()) ? s.lapSectors[idx] : null;
+            if (sec != null) {
+                var bs = s.bestSectors;
+                var cols = sec.size();
+                for (var j = 0; j < cols; j++) {
+                    var sx = barX + barW * (2 * j + 1) / (2 * cols);
+                    var top = (bs != null && j < bs.size() && bs[j] == sec[j]);
+                    dc.setColor(top ? COLOR_GOOD : COLOR_MUTED, Graphics.COLOR_TRANSPARENT);
+                    dc.drawText(sx, y + 20 * k, Graphics.FONT_XTINY, TimeFormat.short(sec[j]), cj);
+                }
+                continue;
+            }
 
             // Gap-to-best bar (empty for the best lap)
             dc.setColor(COLOR_RULE, Graphics.COLOR_TRANSPARENT);

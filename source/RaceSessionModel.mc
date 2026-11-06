@@ -7,21 +7,32 @@ import Toybox.System;
 import Toybox.UserProfile;
 
 const GATE_RADIUS_M = 25.0;      // capture radius around a timing line point
-const MIN_LAP_MS = 10000;        // ignore crossings closer together than this
+const MIN_LAP_MS = 10000;        // circuit: ignore start/finish crossings sooner than this into a lap
+const SPRINT_MIN_RUN_MS = 60000; // sprint: ignore finish crossings sooner than this into a run
+const DRAG_MIN_RUN_MS = 1000;    // drag: only rule out impossible sub-second runs
+const MIN_SPLIT_MS = 2000;       // ignore split crossings this soon after the lap start or the previous split
 const MIN_HEADING_SPEED = 3.0;   // m/s; below this GPS heading is unreliable
+const MIN_CROSS_SPEED = 1.5;     // m/s; slower than this (parked, walking) never counts as a crossing
 const MAX_FIX_GAP_MS = 4000;     // don't interpolate a crossing across a GPS dropout longer than this
+const AUTO_TRACK_RADIUS_M = 5000.0; // pick a saved track automatically if its start line is this close
 
 const EVENT_NONE = 0;
 const EVENT_TIMING_STARTED = 1;
 const EVENT_LAP_COMPLETED = 2;
+const EVENT_SPLIT = 3;
+const EVENT_TRACK_CHANGED = 4;
+
+// Result of setting a line
+const LINE_FAILED = 0;           // no GPS fix
+const LINE_SET = 1;
+const LINE_SET_RECORD_RESET = 2; // set, and the track's old records were cleared
 
 // Holds track setup, live sensor data and lap timing.
 // All timing uses System.getTimer() (milliseconds) for sub-second precision.
 class RaceSessionModel {
-    // --- Track setup (persisted between launches) ---
-    var startGate;          // TimingGate or null (start/finish line in circuit mode)
-    var finishGate;         // TimingGate or null (sprint mode only)
-    var isPointToPoint;     // false = circuit laps, true = A-to-B sprint runs
+    // --- Track setup (persisted) ---
+    var track;              // Track, always set
+    var record;             // TrackRecord for this track and mode, or null
 
     // --- Live data ---
     var currentLocation;    // Position.Location or null
@@ -38,22 +49,36 @@ class RaceSessionModel {
     var sessionEndMs;
     var lapStartMs;         // null while armed and waiting to cross the start line
     var laps;               // Array<Number> of completed lap/run times in ms
-    var bestLapMs;
-    var lastDeltaMs;        // last lap minus the previous best (negative = faster)
-    var lastLapWasBest;
+    var lapSectors;         // per lap: Array<Number> of sector times, or null if a split was missed
+    var bestLapMs;          // best this session
+    var bestSectors;        // best sector times this session, or null
+    var lastDeltaMs;        // last lap minus the track record before it (negative = faster)
+    var lastLapWasBest;     // best of the session
+    var lastLapWasRecord;   // new all-time track record
     var lastLapCompletedMs;
+    var liveDeltaMs;        // current lap vs the record lap at the same point on track, or null
+    var liveProgress;       // fraction of the record lap covered so far, or null
+    var lastSplitIndex;     // 1-based split crossed last, or null
+    var lastSplitDeltaMs;   // that split vs the record lap's, or null
+    var lastSplitMs;        // that split's time into the lap
+    var lastSplitAtMs;      // System.getTimer() when it was crossed
 
-    private var _prevLat;
-    private var _prevLon;
-    private var _prevMs;
-    private var _lastCrossMs;
-    private var _activity;  // ActivityRecording.Session or null
+    // Previous and current fix (radians, ms) for the segment being checked
+    private var _lat0;
+    private var _lon0;
+    private var _ms0;
+    private var _lat1;
+    private var _lon1;
+    private var _ms1;
+    private var _hasPrev;
+
+    private var _trace;         // LapTrace of the lap in progress
+    private var _splitTimes;    // cumulative split times in the lap in progress
+    private var _autoPicked;    // nearest-track check done (or the user chose a track)
+    private var _activity;      // ActivityRecording.Session or null
+    private var _fit;           // RaceFit or null
 
     function initialize() {
-        startGate = null;
-        finishGate = null;
-        isPointToPoint = false;
-
         currentLocation = null;
         speed = null;
         heading = null;
@@ -73,6 +98,9 @@ class RaceSessionModel {
         sessionStartMs = null;
         sessionEndMs = null;
         _activity = null;
+        _fit = null;
+        _autoPicked = false;
+        _hasPrev = false;
         clearTiming();
         loadConfig();
     }
@@ -80,12 +108,113 @@ class RaceSessionModel {
     private function clearTiming() as Void {
         lapStartMs = null;
         laps = [];
+        lapSectors = [];
         bestLapMs = null;
+        bestSectors = null;
         lastDeltaMs = null;
         lastLapWasBest = false;
+        lastLapWasRecord = false;
         lastLapCompletedMs = null;
-        _lastCrossMs = null;
-        _prevMs = null;
+        liveDeltaMs = null;
+        liveProgress = null;
+        lastSplitIndex = null;
+        lastSplitDeltaMs = null;
+        lastSplitMs = null;
+        lastSplitAtMs = null;
+        _trace = null;
+        _splitTimes = [];
+        _hasPrev = false;
+    }
+
+    function mode() as Number {
+        return track.mode;
+    }
+
+    function isRunMode() as Boolean {
+        return track.isRunMode();
+    }
+
+    // Time the current lap is compared with: the track record
+    function referenceMs() {
+        return record != null ? record.ms : null;
+    }
+
+    // Sum of this session's best sectors, or null
+    function optimalMs() {
+        var n = track.activeSplits().size();
+        if (n == 0 || bestSectors == null || bestSectors.size() != n + 1) { return null; }
+        return RaceMath.sum(bestSectors);
+    }
+
+    // ------------------------------------------------------------------
+    // Tracks
+    // ------------------------------------------------------------------
+
+    function listTracks() as Array {
+        return TrackStore.loadAll();
+    }
+
+    private function useTrack(t) as Void {
+        track = t;
+        record = TrackStore.loadRecord(t.id, t.mode);
+        Application.Storage.setValue("currentTrack", t.id);
+    }
+
+    function selectTrack(id) as Boolean {
+        if (isRecording) { return false; }
+        var t = TrackStore.load(id);
+        if (t == null) { return false; }
+        _autoPicked = true;
+        useTrack(t);
+        clearTiming();
+        sessionStartMs = null;
+        return true;
+    }
+
+    function newTrack() as Boolean {
+        if (isRecording || !TrackStore.canCreate()) { return false; }
+        _autoPicked = true;
+        useTrack(TrackStore.create(track.mode));
+        clearTiming();
+        sessionStartMs = null;
+        return true;
+    }
+
+    function renameTrack(name) as Void {
+        track.name = name;
+        TrackStore.save(track);
+    }
+
+    function deleteTrack(id) as Boolean {
+        if (isRecording) { return false; }
+        var list = TrackStore.ids();
+        if (list.size() <= 1) { return false; }
+        TrackStore.remove(id);
+        if (id == track.id) {
+            var t = TrackStore.load(TrackStore.ids()[0]);
+            if (t == null) { t = TrackStore.create(MODE_CIRCUIT); }
+            useTrack(t);
+            clearTiming();
+            sessionStartMs = null;
+        }
+        return true;
+    }
+
+    // Saved track whose start line is nearest, within AUTO_TRACK_RADIUS_M
+    private function nearestTrack(lat, lon) {
+        var all = TrackStore.loadAll();
+        var best = null;
+        var bestD = AUTO_TRACK_RADIUS_M;
+        for (var i = 0; i < all.size(); i++) {
+            var g = all[i].startGate;
+            if (g == null) { continue; }
+            var d = g.distanceTo(lat, lon);
+            if (d < bestD) {
+                bestD = d;
+                best = all[i];
+            }
+        }
+        return best;
     }
 
     // ------------------------------------------------------------------
@@ -102,6 +231,7 @@ class RaceSessionModel {
             return null;
         }
         // Record direction of travel if we're moving, so wrong-way passes are ignored.
+        // Otherwise it's learned the first time the line is crossed in a session.
         var h = null;
         if (speed != null && heading != null && speed >= MIN_HEADING_SPEED) {
             h = heading;
@@ -109,39 +239,79 @@ class RaceSessionModel {
         return TimingGate.fromLocation(currentLocation, h, GATE_RADIUS_M);
     }
 
-    function setStartLine() as Boolean {
+    // Moving the start or finish line changes the lap, so old records no longer apply.
+    private function linesChanged() as Number {
+        TrackStore.save(track);
+        if (TrackStore.hasRecords(track.id)) {
+            TrackStore.clearRecords(track.id);
+            record = null;
+            return LINE_SET_RECORD_RESET;
+        }
+        record = null;
+        return LINE_SET;
+    }
+
+    function setStartLine() as Number {
+        var g = gateHere();
+        if (g == null) { return LINE_FAILED; }
+        track.startGate = g;
+        return linesChanged();
+    }
+
+    function setFinishLine() as Number {
+        var g = gateHere();
+        if (g == null) { return LINE_FAILED; }
+        track.finishGate = g;
+        return linesChanged();
+    }
+
+    function canAddSplit() as Boolean {
+        return track.usesSplits() && track.splits.size() < MAX_SPLITS;
+    }
+
+    function addSplit() as Boolean {
+        if (!canAddSplit()) { return false; }
         var g = gateHere();
         if (g == null) { return false; }
-        startGate = g;
-        saveConfig();
+        track.splits.add(g);
+        splitsChanged();
         return true;
     }
 
-    function setFinishLine() as Boolean {
-        var g = gateHere();
-        if (g == null) { return false; }
-        finishGate = g;
-        saveConfig();
-        return true;
+    function clearSplits() as Void {
+        track.splits = [];
+        splitsChanged();
+    }
+
+    private function splitsChanged() as Void {
+        TrackStore.save(track);
+        TrackStore.clearSectorRecords(track.id);
+        record = TrackStore.loadRecord(track.id, track.mode);
+        bestSectors = null;
     }
 
     function clearLines() as Void {
-        startGate = null;
-        finishGate = null;
-        saveConfig();
+        track.startGate = null;
+        track.finishGate = null;
+        track.splits = [];
+        linesChanged();
     }
 
-    function setPointToPoint(enabled as Boolean) as Void {
-        isPointToPoint = enabled;
-        saveConfig();
+    function setMode(m as Number) as Void {
+        if (isRecording) { return; }
+        track.mode = m;
+        TrackStore.save(track);
+        record = TrackStore.loadRecord(track.id, m);
+        clearTiming();
+        sessionStartMs = null;
     }
 
     // Returns a user-facing reason the session can't start, or null if ready.
     function startProblem() {
-        if (startGate == null) {
-            return isPointToPoint ? "Set start line first" : "Set start/finish first";
+        if (track.startGate == null) {
+            return isRunMode() ? "Set start line first" : "Set start/finish first";
         }
-        if (isPointToPoint && finishGate == null) {
+        if (isRunMode() && track.finishGate == null) {
             return "Set finish line first";
         }
         return null;
@@ -157,17 +327,26 @@ class RaceSessionModel {
         sessionStartMs = System.getTimer();
         sessionEndMs = null;
         isRecording = true;
+        _autoPicked = true;     // don't switch tracks under a running session
 
         // Record a FIT activity so the session (GPS track, HR, laps) syncs to Garmin Connect.
         if (Toybox has :ActivityRecording) {
             try {
                 _activity = ActivityRecording.createSession({
-                    :name => isPointToPoint ? "Sprint" : "Track Day",
+                    :name => ModeInfo.activityName(track.mode),
                     :sport => Activity.SPORT_DRIVING
                 });
+                if (Toybox has :FitContributor) {
+                    try {
+                        _fit = new RaceFit(_activity);
+                    } catch (e) {
+                        _fit = null;
+                    }
+                }
                 _activity.start();
             } catch (e) {
                 _activity = null;
+                _fit = null;
             }
         }
     }
@@ -177,8 +356,13 @@ class RaceSessionModel {
         isRecording = false;
         sessionEndMs = System.getTimer();
         lapStartMs = null;
+        liveDeltaMs = null;
+        liveProgress = null;
 
         if (_activity != null) {
+            if (_fit != null) {
+                _fit.setSession(bestLapMs, optimalMs(), referenceMs());
+            }
             if (_activity.isRecording()) {
                 _activity.stop();
             }
@@ -188,6 +372,7 @@ class RaceSessionModel {
                 _activity.discard();
             }
             _activity = null;
+            _fit = null;
         }
     }
 
@@ -226,74 +411,219 @@ class RaceSessionModel {
         var lon = r[1].toDouble();
 
         var evt = EVENT_NONE;
-        if (isRecording && _prevMs != null && (now - _prevMs) <= MAX_FIX_GAP_MS) {
-            evt = detectCrossing(_prevLat, _prevLon, _prevMs, lat, lon, now);
+
+        // First good fix of the launch: switch to the saved track we're at.
+        if (!_autoPicked && !isRecording) {
+            _autoPicked = true;
+            var near = nearestTrack(lat, lon);
+            if (near != null && near.id != track.id) {
+                useTrack(near);
+                clearTiming();
+                sessionStartMs = null;
+                evt = EVENT_TRACK_CHANGED;
+            }
         }
-        _prevLat = lat;
-        _prevLon = lon;
-        _prevMs = now;
+
+        if (isRecording && _hasPrev && (now - _ms1) <= MAX_FIX_GAP_MS) {
+            _lat0 = _lat1; _lon0 = _lon1; _ms0 = _ms1;
+            _lat1 = lat;   _lon1 = lon;   _ms1 = now;
+            // A car that's parked or crawling never crosses a line: this keeps
+            // GPS wander from triggering a start while you're staged on the line.
+            if (speed == null || speed >= MIN_CROSS_SPEED) {
+                evt = detectCrossing();
+            }
+        } else {
+            _lat1 = lat; _lon1 = lon; _ms1 = now;
+        }
+        _hasPrev = true;
+
+        if (isRecording && lapStartMs != null) {
+            trackLap(lat, lon, now);
+        }
         return evt;
     }
 
-    // Interpolated crossing time in ms, or -1 if the gate wasn't crossed.
-    private function crossTime(gate, lat0, lon0, ms0, lat1, lon1, ms1) as Number {
-        if (gate == null) { return -1; }
-        var t = gate.crossingFraction(lat0, lon0, lat1, lon1);
-        if (t < 0) { return -1; }
-        return (ms0 + t * (ms1 - ms0)).toNumber();
+    // Adds the fix to the lap trace and updates the live delta.
+    private function trackLap(lat, lon, now) as Void {
+        var p = track.startGate.toLocal(lat, lon);
+        var el = now - lapStartMs;
+        if (_trace != null) { _trace.add(p[0], p[1], el); }
+
+        liveDeltaMs = null;
+        liveProgress = null;
+        if (record != null && record.trace != null && record.ms != null && record.ms > 0) {
+            var refT = record.trace.timeAt(p[0], p[1]);
+            if (refT >= 0) {
+                liveDeltaMs = el - refT;
+                liveProgress = refT.toFloat() / record.ms;
+            }
+        }
+        if (_fit != null) { _fit.setLiveDelta(liveDeltaMs); }
     }
 
-    private function detectCrossing(lat0, lon0, ms0, lat1, lon1, ms1) as Number {
-        if (isPointToPoint) {
-            if (lapStartMs == null) {
-                var atStart = crossTime(startGate, lat0, lon0, ms0, lat1, lon1, ms1);
-                if (atStart >= 0 && debounced(atStart)) {
-                    lapStartMs = atStart;
-                    return EVENT_TIMING_STARTED;
-                }
-            } else {
-                var atFinish = crossTime(finishGate, lat0, lon0, ms0, lat1, lon1, ms1);
-                if (atFinish >= 0 && debounced(atFinish)) {
-                    completeLap(atFinish);
-                    lapStartMs = null;      // re-armed for the next run
-                    return EVENT_LAP_COMPLETED;
-                }
+    // Fraction (0..1) along the current segment where it crosses the gate, or -1
+    private function crossFrac(gate) as Float {
+        if (gate == null) { return -1.0; }
+        return gate.crossingFraction(_lat0, _lon0, _lat1, _lon1);
+    }
+
+    private function segTime(t) as Number {
+        return (_ms0 + t * (_ms1 - _ms0)).toNumber();
+    }
+
+    // Crossing point in the start line's frame, [x, y] metres
+    private function segPoint(t) as Array {
+        var lat = _lat0 + t * (_lat1 - _lat0);
+        var lon = _lon0 + t * (_lon1 - _lon0);
+        return track.startGate.toLocal(lat, lon);
+    }
+
+    private function detectCrossing() as Number {
+        var m = track.mode;
+
+        if (lapStartMs == null) {
+            // Armed: waiting for the start line
+            var ts = crossFrac(track.startGate);
+            if (ts < 0) { return EVENT_NONE; }
+            learnDirection(track.startGate);
+            beginLap(segTime(ts), ts);
+            // Close the out-lap (or the transit between runs) in the FIT file
+            if (_activity != null && _activity.isRecording()) {
+                if (_fit != null) { _fit.clearLap(); }
+                _activity.addLap();
             }
+            return EVENT_TIMING_STARTED;
+        }
+
+        var evt = checkSplit() ? EVENT_SPLIT : EVENT_NONE;
+
+        var endGate = (m == MODE_CIRCUIT) ? track.startGate : track.finishGate;
+        var te = crossFrac(endGate);
+        if (te < 0) { return evt; }
+        var at = segTime(te);
+        var minMs = MIN_LAP_MS;
+        if (m == MODE_SPRINT) { minMs = SPRINT_MIN_RUN_MS; }
+        else if (m == MODE_DRAG) { minMs = DRAG_MIN_RUN_MS; }
+        if (at - lapStartMs < minMs) { return evt; }
+
+        learnDirection(endGate);
+        completeLap(at, te);
+        if (m == MODE_CIRCUIT) {
+            beginLap(at, te);
         } else {
-            var atLine = crossTime(startGate, lat0, lon0, ms0, lat1, lon1, ms1);
-            if (atLine >= 0 && debounced(atLine)) {
-                if (lapStartMs == null) {   // first crossing ends the out-lap
-                    lapStartMs = atLine;
-                    return EVENT_TIMING_STARTED;
-                }
-                completeLap(atLine);
-                lapStartMs = atLine;
-                return EVENT_LAP_COMPLETED;
-            }
+            lapStartMs = null;      // re-armed for the next run
+            _trace = null;
         }
-        return EVENT_NONE;
+        return EVENT_LAP_COMPLETED;
     }
 
-    private function debounced(at as Number) as Boolean {
-        if (_lastCrossMs != null && (at - _lastCrossMs) < MIN_LAP_MS) {
-            return false;
+    // Checks the next split line in order. Returns true if it was crossed.
+    private function checkSplit() as Boolean {
+        var sp = track.activeSplits();
+        var k = _splitTimes.size();
+        if (k >= sp.size()) { return false; }
+        var t = crossFrac(sp[k]);
+        if (t < 0) { return false; }
+        var since = segTime(t) - lapStartMs;
+        var prev = (k > 0) ? _splitTimes[k - 1] : 0;
+        if (since - prev < MIN_SPLIT_MS) { return false; }
+
+        learnDirection(sp[k]);
+        _splitTimes.add(since);
+        lastSplitIndex = k + 1;
+        lastSplitMs = since;
+        lastSplitAtMs = System.getTimer();
+        lastSplitDeltaMs = null;
+        if (record != null && record.splits != null && record.splits.size() > k) {
+            lastSplitDeltaMs = since - record.splits[k];
         }
-        _lastCrossMs = at;
         return true;
     }
 
-    private function completeLap(at as Number) as Void {
+    // A line set while standing still has no direction. Take it from the first
+    // real crossing, so from then on wrong-way passes are ignored.
+    private function learnDirection(gate) as Void {
+        if (gate == null || gate.heading != null) { return; }
+        var h = gate.headingOf(_lat0, _lon0, _lat1, _lon1, _ms1 - _ms0, MIN_HEADING_SPEED);
+        if (h != null) {
+            gate.heading = h;
+            TrackStore.save(track);
+        }
+    }
+
+    private function beginLap(at as Number, t) as Void {
+        lapStartMs = at;
+        _splitTimes = [];
+        lastSplitIndex = null;
+        liveDeltaMs = null;
+        liveProgress = null;
+        _trace = new LapTrace(null);
+        var p = segPoint(t);
+        _trace.add(p[0], p[1], 0);
+        if (record != null && record.trace != null) { record.trace.resetCursor(); }
+    }
+
+    private function completeLap(at as Number, t) as Void {
         var lap = at - lapStartMs;
-        lastDeltaMs = (bestLapMs != null) ? lap - bestLapMs : null;
+        if (_trace != null) {
+            var p = segPoint(t);
+            _trace.add(p[0], p[1], lap);
+        }
+
+        // Sector times, if every split was crossed
+        var sectors = null;
+        var n = track.activeSplits().size();
+        if (n > 0 && _splitTimes.size() == n) {
+            sectors = [];
+            var prev = 0;
+            for (var i = 0; i < n; i++) {
+                sectors.add(_splitTimes[i] - prev);
+                prev = _splitTimes[i];
+            }
+            sectors.add(lap - prev);
+            bestSectors = RaceMath.minEach(bestSectors, sectors);
+        }
+
+        var prevRecord = referenceMs();
+        lastDeltaMs = (prevRecord != null) ? lap - prevRecord : null;
+        lastLapWasRecord = (prevRecord == null || lap < prevRecord);
         lastLapWasBest = (bestLapMs == null || lap < bestLapMs);
         if (lastLapWasBest) {
             bestLapMs = lap;
         }
         laps.add(lap);
+        lapSectors.add(sectors);
         lastLapCompletedMs = System.getTimer();
+        liveDeltaMs = null;
+        liveProgress = null;
+
+        updateRecord(lap, sectors);
 
         if (_activity != null && _activity.isRecording()) {
+            if (_fit != null) { _fit.setLap(lap, lastDeltaMs, sectors); }
             _activity.addLap();
+            if (_fit != null) { _fit.clearLap(); }
+        }
+    }
+
+    private function updateRecord(lap as Number, sectors) as Void {
+        var changed = false;
+        if (record == null) { record = new TrackRecord(); }
+        if (lastLapWasRecord) {
+            record.ms = lap;
+            record.trace = _trace;
+            record.splits = (sectors != null) ? _splitTimes : null;
+            changed = true;
+        }
+        if (sectors != null) {
+            var merged = RaceMath.minEach(record.sectors, sectors);
+            if (!RaceMath.sameArray(merged, record.sectors)) {
+                record.sectors = merged;
+                changed = true;
+            }
+        }
+        if (changed) {
+            TrackStore.saveRecord(track.id, track.mode, record);
         }
     }
 
@@ -325,11 +655,15 @@ class RaceSessionModel {
         return 5;
     }
 
-    // Fraction of the best lap elapsed in the current lap (can exceed 1.0), or null
+    // How far through the lap we are compared with the record lap (can exceed
+    // 1.0), or null. Uses position on track when the record trace matches,
+    // otherwise elapsed time.
     function getLapProgress() {
+        if (liveProgress != null) { return liveProgress; }
         var cur = getCurrentLapMs();
-        if (cur == null || bestLapMs == null || bestLapMs <= 0) { return null; }
-        return cur.toFloat() / bestLapMs;
+        var ref = referenceMs();
+        if (cur == null || ref == null || ref <= 0) { return null; }
+        return cur.toFloat() / ref;
     }
 
     function getLastLapMs() {
@@ -351,28 +685,20 @@ class RaceSessionModel {
     // ------------------------------------------------------------------
 
     private function loadConfig() as Void {
+        var t = null;
         try {
-            startGate = TimingGate.fromStorage(Application.Storage.getValue("startGate"), GATE_RADIUS_M);
-            finishGate = TimingGate.fromStorage(Application.Storage.getValue("finishGate"), GATE_RADIUS_M);
-            isPointToPoint = (Application.Storage.getValue("pointToPoint") == true);
+            TrackStore.migrateLegacy();
+            t = TrackStore.load(Application.Storage.getValue("currentTrack"));
+            if (t == null) {
+                var list = TrackStore.ids();
+                if (list.size() > 0) { t = TrackStore.load(list[0]); }
+            }
+            if (t == null) { t = TrackStore.create(MODE_CIRCUIT); }
+            useTrack(t);
         } catch (e) {
-            startGate = null;
-            finishGate = null;
-            isPointToPoint = false;
-        }
-    }
-
-    private function saveConfig() as Void {
-        storeGate("startGate", startGate);
-        storeGate("finishGate", finishGate);
-        Application.Storage.setValue("pointToPoint", isPointToPoint);
-    }
-
-    private function storeGate(key as String, gate) as Void {
-        if (gate != null) {
-            Application.Storage.setValue(key, gate.toStorage());
-        } else {
-            Application.Storage.deleteValue(key);
+            // Storage unreadable: run with an unsaved track rather than not at all.
+            track = (t != null) ? t : new Track(1, "Track 1");
+            record = null;
         }
     }
 }

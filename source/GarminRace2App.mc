@@ -51,9 +51,14 @@ class GarminRace2App extends Application.AppBase {
     function onPosition(info as Position.Info) as Void {
         var evt = raceSession.onPosition(info);
         if (evt == EVENT_LAP_COMPLETED) {
-            RaceAlerts.lap(raceSession.lastLapWasBest);
+            RaceAlerts.lap(raceSession.lastLapWasBest || raceSession.lastLapWasRecord);
         } else if (evt == EVENT_TIMING_STARTED) {
             RaceAlerts.timingStarted();
+        } else if (evt == EVENT_SPLIT) {
+            RaceAlerts.split();
+        } else if (evt == EVENT_TRACK_CHANGED) {
+            RaceAlerts.confirm();
+            RaceAlerts.toast(raceSession.track.name);
         }
         WatchUi.requestUpdate();
     }

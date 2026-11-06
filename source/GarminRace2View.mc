@@ -6,6 +6,7 @@ import Toybox.Timer;
 import Toybox.WatchUi;
 
 const LAP_FLASH_MS = 6000;   // how long a completed lap stays on the big display
+const SPLIT_FLASH_MS = 4000; // how long a split time stays in the pill
 
 // Shared colours
 const COLOR_BG     = Graphics.COLOR_BLACK;
@@ -24,12 +25,13 @@ const COLOR_PANEL  = 0x181818;
 //
 //   header   ● LAP 5 ▂▄▆        state + lap number + GPS
 //   hero       1:01.2           running lap (completed lap for 6 s)
-//   pill    ( LAST 1:24.10 )    delta / prompt
+//   pill    (    -0.32    )     live delta to the track record / split / prompt
 //   stats   BEST · L3 |  HR
 //           1:23.45   | ♥ 142
 //   footer  12:34 · 148 km/h
 //
-// Bezel ring: current lap as a fraction of the best lap.
+// Bezel ring: how far round the track record lap you are, green while ahead
+// of it and red while behind.
 // All y positions are designed at 416 px and scaled for other screen sizes.
 class GarminRace2View extends WatchUi.View {
     private var _timer;
@@ -67,7 +69,9 @@ class GarminRace2View extends WatchUi.View {
         var k = h / 416.0;               // layout scale
         var cx = w / 2;
         var now = System.getTimer();
-        var unit = s.isPointToPoint ? "RUN " : "LAP ";
+        var runMode = s.isRunMode();
+        var tr = s.track;
+        var unit = runMode ? "RUN " : "LAP ";
         var blinkOn = (now / 500) % 2 == 0;
 
         if (dc has :setAntiAlias) { dc.setAntiAlias(true); }
@@ -91,39 +95,75 @@ class GarminRace2View extends WatchUi.View {
             ring = 1.0;
             pillFont = Graphics.FONT_SMALL;
             pillFg = Graphics.COLOR_BLACK;
-            if (s.lastLapWasBest) {
-                head = "NEW BEST";
+            // Pill: gap to the track record as it stood before this lap.
+            if (s.lastDeltaMs == null) {
+                pillBg = COLOR_GOOD;
+                pillText = runMode ? "FIRST RUN" : "FIRST LAP";
+            } else {
+                pillBg = s.lastDeltaMs < 0 ? COLOR_GOOD : COLOR_BAD;
+                pillText = TimeFormat.delta(s.lastDeltaMs);
+            }
+            if (s.lastLapWasRecord) {
+                head = "NEW RECORD";
                 headColor = COLOR_GOOD;
                 bigColor = COLOR_GOOD;
                 ringColor = COLOR_GOOD;
-                pillBg = COLOR_GOOD;
-                pillText = s.lastDeltaMs != null ? TimeFormat.delta(s.lastDeltaMs) : "FIRST LAP";
+            } else if (s.lastLapWasBest) {
+                head = "SESSION BEST";
+                headColor = COLOR_GOOD;
+                bigColor = COLOR_GOOD;
+                ringColor = COLOR_GOOD;
             } else {
                 head = unit + s.laps.size().toString() + " DONE";
                 bigColor = COLOR_WARN;
                 ringColor = COLOR_WARN;
-                pillBg = COLOR_BAD;
-                pillText = TimeFormat.delta(s.lastDeltaMs);
             }
         } else if (s.lapStartMs != null) {
             head = unit + (s.laps.size() + 1).toString();
             dotColor = blinkOn ? COLOR_BAD : null;
             var cur = s.getCurrentLapMs();
             big = TimeFormat.lapTenths(cur);
+            var ref = s.referenceMs();
             var p = s.getLapProgress();
-            if (p != null && p > 1.0) {
-                // Already slower than the best lap: show the live gap.
-                ring = 1.0;
+            var splitFlash = s.lastSplitIndex != null && s.lastSplitAtMs != null
+                && (now - s.lastSplitAtMs) < SPLIT_FLASH_MS;
+
+            ring = (p != null && p > 1.0) ? 1.0 : p;
+            if (s.liveDeltaMs != null) {
+                ringColor = s.liveDeltaMs < 0 ? COLOR_GOOD : COLOR_BAD;
+            } else if (p != null && p > 1.0) {
                 ringColor = COLOR_BAD;
-                pillText = TimeFormat.delta(cur - s.bestLapMs);
+            }
+
+            if (splitFlash) {
+                // Just crossed a split: its gap to the record lap's split
+                var sd = s.lastSplitDeltaMs;
+                pillFont = Graphics.FONT_SMALL;
+                if (sd != null) {
+                    pillText = "S" + s.lastSplitIndex.toString() + "  " + TimeFormat.delta(sd);
+                    pillFg = Graphics.COLOR_BLACK;
+                    pillBg = sd < 0 ? COLOR_GOOD : COLOR_BAD;
+                } else {
+                    pillText = "S" + s.lastSplitIndex.toString() + "  " + TimeFormat.lap(s.lastSplitMs);
+                    pillFg = Graphics.COLOR_WHITE;
+                    pillBg = COLOR_PANEL;
+                }
+            } else if (s.liveDeltaMs != null) {
+                // Live gap to the record lap at this point on track
+                pillText = TimeFormat.delta(s.liveDeltaMs);
+                pillFont = Graphics.FONT_SMALL;
+                pillFg = Graphics.COLOR_BLACK;
+                pillBg = s.liveDeltaMs < 0 ? COLOR_GOOD : COLOR_BAD;
+            } else if (ref != null && cur > ref) {
+                // Already slower than the record lap
+                pillText = TimeFormat.delta(cur - ref);
                 pillFont = Graphics.FONT_SMALL;
                 pillFg = Graphics.COLOR_BLACK;
                 pillBg = COLOR_BAD;
             } else {
-                ring = p;
                 var last = s.getLastLapMs();
                 pillText = last != null ? "LAST " + TimeFormat.lap(last)
-                                        : (s.isPointToPoint ? "TIMING RUN" : "FIRST TIMED LAP");
+                                        : (runMode ? "TIMING RUN" : "FIRST TIMED LAP");
                 pillBg = COLOR_PANEL;
             }
         } else if (s.isRecording) {
@@ -132,24 +172,24 @@ class GarminRace2View extends WatchUi.View {
             dotColor = blinkOn ? COLOR_WARN : null;
             big = "0:00.0";
             bigColor = COLOR_DIM;
-            pillText = s.isPointToPoint ? "CROSS START LINE" : "CROSS LINE TO START";
+            pillText = runMode ? "CROSS START LINE" : "CROSS LINE TO START";
             pillFg = COLOR_WARN;
             pillOutline = COLOR_WARN;
         } else {
-            head = s.isPointToPoint ? "SPRINT" : "CIRCUIT";
+            head = ModeInfo.name(s.mode()).toUpper();
             headColor = COLOR_MUTED;
             big = "0:00.0";
             bigColor = COLOR_DIM;
-            if (s.startGate == null) {
-                pillText = s.isPointToPoint ? "SET START IN MENU" : "SET LINE IN MENU";
+            if (tr.startGate == null) {
+                pillText = runMode ? "SET START IN MENU" : "SET LINE IN MENU";
                 pillFg = Graphics.COLOR_ORANGE;
                 pillOutline = Graphics.COLOR_ORANGE;
-            } else if (s.isPointToPoint && s.finishGate == null) {
+            } else if (runMode && tr.finishGate == null) {
                 pillText = "SET FINISH IN MENU";
                 pillFg = Graphics.COLOR_ORANGE;
                 pillOutline = Graphics.COLOR_ORANGE;
             } else if (s.sessionStartMs != null) {
-                pillText = "SAVED  ·  " + s.laps.size().toString() + (s.isPointToPoint ? " RUNS" : " LAPS");
+                pillText = "SAVED  ·  " + s.laps.size().toString() + (runMode ? " RUNS" : " LAPS");
                 pillBg = COLOR_PANEL;
             } else {
                 pillText = "PRESS START";
@@ -184,15 +224,22 @@ class GarminRace2View extends WatchUi.View {
         var valY = 328 * k;
         var cj = Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER;
 
+        // Session best once there is one, otherwise the track record to beat
         var bestCap = "BEST";
-        if (s.bestLapMs != null && s.laps.size() > 1) {
+        var bestVal = s.bestLapMs;
+        var bestColor = COLOR_GOOD;
+        if (bestVal == null && s.referenceMs() != null) {
+            bestCap = "RECORD";
+            bestVal = s.referenceMs();
+            bestColor = COLOR_ACCENT;
+        } else if (s.bestLapMs != null && s.laps.size() > 1) {
             var n = s.getBestLapNumber();
-            if (n != null) { bestCap = "BEST  ·  " + (s.isPointToPoint ? "R" : "L") + n.toString(); }
+            if (n != null) { bestCap = "BEST  ·  " + (runMode ? "R" : "L") + n.toString(); }
         }
         dc.setColor(COLOR_DIM, Graphics.COLOR_TRANSPARENT);
         dc.drawText(bx, capY, Graphics.FONT_XTINY, bestCap, cj);
-        dc.setColor(s.bestLapMs != null ? COLOR_GOOD : COLOR_DIM, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(bx, valY, Graphics.FONT_SMALL, TimeFormat.lap(s.bestLapMs), cj);
+        dc.setColor(bestVal != null ? bestColor : COLOR_DIM, Graphics.COLOR_TRANSPARENT);
+        dc.drawText(bx, valY, Graphics.FONT_SMALL, TimeFormat.lap(bestVal), cj);
 
         dc.setColor(COLOR_RULE, Graphics.COLOR_TRANSPARENT);
         dc.fillRectangle(cx + 2 * k, 292 * k, 2, 52 * k);
@@ -212,10 +259,10 @@ class GarminRace2View extends WatchUi.View {
         var footer;
         if (s.isRecording) {
             footer = TimeFormat.duration(s.getSessionMs()) + "  ·  " + spd;
-        } else if (s.isPointToPoint) {
-            footer = "S " + (s.startGate != null ? "OK" : "--") + "  F " + (s.finishGate != null ? "OK" : "--") + "  ·  " + spd;
         } else {
-            footer = (s.startGate != null ? "LINE SET" : "NO LINE") + "  ·  " + spd;
+            var name = tr.name;
+            if (name.length() > 12) { name = name.substring(0, 12); }
+            footer = name + "  ·  " + spd;
         }
         dc.setColor(COLOR_MUTED, Graphics.COLOR_TRANSPARENT);
         dc.drawText(cx, 378 * k, Graphics.FONT_XTINY, footer, cj);
