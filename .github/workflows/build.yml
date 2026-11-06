@@ -19,7 +19,7 @@ jobs:
     container:
       image: ghcr.io/matco/connectiq-tester@sha256:64958e8fd2925d0c4986d72a9aa9d8e2101297a881354aab0118be2f1dc22105
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Make device files visible to the compiler
         # The image stores them under /root/.Garmin; Actions may set HOME elsewhere.
@@ -54,7 +54,7 @@ jobs:
         if: always()
         run: rm -rf "$RUNNER_TEMP/key"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: GarminRace2-${{ github.sha }}
           path: bin/GarminRace2.prg
